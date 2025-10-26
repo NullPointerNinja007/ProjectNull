@@ -1,31 +1,22 @@
-# Dockerfile
-FROM python:3.12-slim
-
-# Avoid interactive tzdata prompts & speed up pip
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# System deps for pillow (and some scientific libs); very small footprint on slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libjpeg62-turbo \
-    zlib1g \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Python deps first (better layer cache)
+# Copy requirements file
 COPY requirements.txt .
-RUN pip install -r requirements.txt
 
-# Copy app source
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
 COPY . .
 
-# Cloud Run provides $PORT; default to 8080 for local runs
+# Expose port
+EXPOSE 8080
+
+# Set environment variables
 ENV PORT=8080
+ENV PYTHONUNBUFFERED=1
 
-# Start the server
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
-
-CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}
+# Run the application
+CMD exec uvicorn app.main:app --host 0.0.0.0 --port $PORT
