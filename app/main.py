@@ -1,68 +1,77 @@
-import io, json, os
+import os
 from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from PIL import Image, UnidentifiedImageError
-import pandas as pd
+from PIL import Image
+import io
+import google.generativeai as genai
 
-from google import genai
-from google.genai import types
-from dotenv import load_dotenv
-load_dotenv()
+# Load environment variables from .env file if it exists (for local development)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 app = FastAPI(title="Food Detector API", version="1.0.0")
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    raise RuntimeError("GOOGLE_API_KEY env var not set")
-
-client = genai.Client(api_key=GOOGLE_API_KEY)
-
-PROMPT = (
-    "Identify distinct objects in this photo. only include items which are edible "
-    "Return JSON with fields: items:[{label:string, count:int}]. If unsure, best guess."
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure this in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-def to_image_part(upload: UploadFile) -> types.Part:
-    data = upload.file.read()
-    if not data:
-        raise HTTPException(400, "Empty file")
+# Configure Google Generative AI
+api_key = os.getenv("GOOGLE_API_KEY")
+if api_key:
+    genai.configure(api_key=api_key)
+else:
+    print("Warning: GOOGLE_API_KEY not found in environment variables")
+
+@app.get("/")
+async def root():
+    return {"message": "Food Detector API", "status": "running"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+@app.post("/detect")
+async def detect_food(file: UploadFile = File(...)):
+    """
+    Detect food in an uploaded image using Google's Gemini Vision API
+    """
     try:
-        Image.open(io.BytesIO(data)).verify()
-    except UnidentifiedImageError:
-        raise HTTPException(400, "Uploaded file is not a valid image")
-    mime = upload.content_type or "image/jpeg"
-    return types.Part.from_bytes(data=data, mime_type=mime)
-
-@app.post("/predict")
-async def predict(file: UploadFile = File(...)):
-    part = to_image_part(file)
-
-
-    try:
-        resp = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[part, PROMPT],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.2,
-            ),
-        )
+        # Validate file type
+        if not file.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="File must be an image")
+        
+        # Read image
+        image_bytes = await file.read()
+        image = Image.open(io.BytesIO(image_bytes))
+        
+        # Initialize Gemini model
+        model = genai.GenerativeModel('gemini-pro-vision')
+        
+        # Prepare prompt
+        prompt = "Identify all food items in this image. List each food item and describe it briefly."
+        
+        # Generate response
+        response = model.generate_content([prompt, image])
+        
+        return {
+            "status": "success",
+            "filename": file.filename,
+            "detected_foods": response.text
+        }
+    
     except Exception as e:
-        raise HTTPException(502, f"Model call failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-    # Extract JSON text
-    try:
-        raw = resp.candidates[0].content.parts[0].text
-        data = json.loads(raw)
-        items = data.get("items", [])
-        # build DataFrame (just to prove it’s tabular—API returns JSON)
-        df = pd.DataFrame(items, columns=["label", "count"])
-    except Exception as e:
-        raise HTTPException(502, f"Bad model response: {e}")
-
-    # Return JSON (client can do pd.DataFrame(...) on this)
-    return JSONResponse({"items": items})
-
-@app.get("/healthz")
-def healthz():
-    return {"ok": True}
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
